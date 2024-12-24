@@ -1,0 +1,6 @@
+# Diğer dosyaları yoksay ama assets klasörünü dahil et
+!assets/
+!assets/*.mmdb
+
+# Ortam değişkenleri
+.env 

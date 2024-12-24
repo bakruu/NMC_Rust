@@ -2,6 +2,19 @@ import React, { useEffect, useRef } from 'react';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 
+// Leaflet marker ikonları için gerekli
+import icon from 'leaflet/dist/images/marker-icon.png';
+import iconShadow from 'leaflet/dist/images/marker-shadow.png';
+
+let DefaultIcon = L.icon({
+  iconUrl: icon,
+  shadowUrl: iconShadow,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41]
+});
+
+L.Marker.prototype.options.icon = DefaultIcon;
+
 export function Map({ connections }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -10,7 +23,9 @@ export function Map({ connections }) {
   useEffect(() => {
     if (!mapInstanceRef.current) {
       mapInstanceRef.current = L.map(mapRef.current).setView([0, 0], 2);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(mapInstanceRef.current);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+      }).addTo(mapInstanceRef.current);
     }
   }, []);
 
@@ -26,7 +41,7 @@ export function Map({ connections }) {
           .bindPopup(`
             <div>
               <strong>Kaynak:</strong><br/>
-              IP: ${conn.source}<br/>
+              IP: ${conn.source_ip}<br/>
               Ülke: ${conn.source_location.country}<br/>
               Şehir: ${conn.source_location.city}
             </div>
@@ -37,7 +52,7 @@ export function Map({ connections }) {
           .bindPopup(`
             <div>
               <strong>Hedef:</strong><br/>
-              IP: ${conn.destination}<br/>
+              IP: ${conn.dest_ip}<br/>
               Ülke: ${conn.dest_location.country}<br/>
               Şehir: ${conn.dest_location.city}
             </div>
@@ -58,5 +73,17 @@ export function Map({ connections }) {
     });
   }, [connections]);
 
-  return <div ref={mapRef} style={{ height: '500px', width: '100%' }} />;
+  return (
+    <div 
+      ref={mapRef} 
+      style={{ 
+        height: '100vh', 
+        width: '100%',
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        zIndex: 1 
+      }} 
+    />
+  );
 } 

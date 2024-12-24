@@ -1,57 +1,124 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { Map } from './Map';
+import './App.css';
 
 function App() {
   const [packets, setPackets] = useState([]);
   const [connections, setConnections] = useState([]);
-  const [ws, setWs] = useState(null);
+  const [activeConnections, setActiveConnections] = useState(new Set());
+  const [wsConnected, setWsConnected] = useState(false);
 
-  useEffect(() => {
+  const connectWebSocket = useCallback(() => {
+    console.log('WebSocket bağlantısı kuruluyor...');
     const websocket = new WebSocket('ws://localhost:8080');
     
     websocket.onopen = () => {
       console.log('WebSocket bağlantısı açıldı');
+      setWsConnected(true);
     };
 
     websocket.onmessage = (event) => {
-      const packet = JSON.parse(event.data);
-      setPackets(prev => [...prev, packet]);
-      
-      if (packet.source_ip && packet.dest_ip) {
-        setConnections(prev => [...prev, {
-          source: packet.source_ip,
-          destination: packet.dest_ip,
-          timestamp: packet.timestamp
-        }]);
+      console.log('Ham veri alındı:', event.data);
+      try {
+        const packet = JSON.parse(event.data);
+        console.log('İşlenmiş paket:', packet);
+        
+        setPackets(prev => {
+          console.log('Önceki paketler:', prev);
+          if (prev.length > 100) {
+            return [...prev.slice(-99), packet];
+          }
+          return [...prev, packet];
+        });
+        
+        if (packet.source_location && packet.dest_location) {
+          console.log('Konum bilgisi olan paket:', packet);
+          const connectionKey = `${packet.source_ip}-${packet.dest_ip}`;
+          
+          if (!activeConnections.has(connectionKey)) {
+            console.log('Yeni bağlantı ekleniyor:', connectionKey);
+            setActiveConnections(prev => new Set([...prev, connectionKey]));
+            setConnections(prev => [...prev, packet]);
+          }
+        }
+      } catch (error) {
+        console.error('Paket işleme hatası:', error);
       }
     };
 
     websocket.onerror = (error) => {
       console.error('WebSocket hatası:', error);
+      setWsConnected(false);
     };
 
-    setWs(websocket);
+    websocket.onclose = () => {
+      console.log('WebSocket bağlantısı kapandı');
+      setWsConnected(false);
+      // 5 saniye sonra yeniden bağlanmayı dene
+      setTimeout(connectWebSocket, 5000);
+    };
 
+    return websocket;
+  }, [activeConnections]);
+
+  useEffect(() => {
+    const ws = connectWebSocket();
     return () => {
-      websocket.close();
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
     };
-  }, []);
+  }, [connectWebSocket]);
 
   return (
-    <div>
-      <h1>Ağ Trafiği İzleyici</h1>
+    <div className="app-container">
       <Map connections={connections} />
       <div className="packets-list">
-        {packets.map((packet, index) => (
-          <div key={index} className="packet-item">
-            <p>Boyut: {packet.size} bytes</p>
-            <p>Kaynak MAC: {packet.source_mac}</p>
-            <p>Hedef MAC: {packet.dest_mac}</p>
-            <p>Tip: {packet.type}</p>
-            <p>Zaman: {packet.timestamp}</p>
-            <hr />
-          </div>
-        ))}
+        <h1>Ağ Trafiği İzleyici</h1>
+        <div className="connection-status">
+          <span className={`status-indicator ${wsConnected ? 'connected' : 'disconnected'}`}>
+            {wsConnected ? 'Bağlı' : 'Bağlantı Kesik'}
+          </span>
+        </div>
+        <div className="active-connections">
+          <h2>Aktif Bağlantılar</h2>
+          {connections.map((conn, index) => (
+            <div key={index} className="connection-item">
+              <p><strong>Kaynak:</strong> {conn.source_ip}</p>
+              <p>{conn.source_location?.country}, {conn.source_location?.city}</p>
+              <p><strong>Hedef:</strong> {conn.dest_ip}</p>
+              <p>{conn.dest_location?.country}, {conn.dest_location?.city}</p>
+              <hr />
+            </div>
+          ))}
+        </div>
+        <div className="recent-packets">
+          <h2>Son Paketler</h2>
+          {packets.slice(-10).reverse().map((packet, index) => (
+            <div key={index} className="packet-item">
+              <p>Boyut: {packet.size} bytes</p>
+              {packet.source_ip && (
+                <p>Kaynak: {packet.source_ip}
+                  {packet.source_location && 
+                    <span className="location-info">
+                      ({packet.source_location.country}, {packet.source_location.city})
+                    </span>
+                  }
+                </p>
+              )}
+              {packet.dest_ip && (
+                <p>Hedef: {packet.dest_ip}
+                  {packet.dest_location && 
+                    <span className="location-info">
+                      ({packet.dest_location.country}, {packet.dest_location.city})
+                    </span>
+                  }
+                </p>
+              )}
+              <p>Zaman: {new Date(packet.timestamp).toLocaleTimeString()}</p>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
