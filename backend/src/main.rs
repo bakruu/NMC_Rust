@@ -19,8 +19,15 @@ async fn main() {
     // Paket yakalamayı başlat
     let capture_task = tokio::spawn(async move {
         println!("Paket yakalama başlatılıyor...");
-        if let Err(e) = capture::start_packet_capture(tx).await {
-            eprintln!("Paket yakalama hatası: {}", e);
+        loop {
+            match capture::start_packet_capture(tx.clone()).await {
+                Ok(_) => println!("Paket yakalama normal şekilde sonlandı"),
+                Err(e) => {
+                    eprintln!("Paket yakalama hatası: {}", e);
+                    println!("5 saniye sonra yeniden başlatılacak...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+            }
         }
     });
 

@@ -10,56 +10,66 @@ function App() {
 
   const connectWebSocket = useCallback(() => {
     console.log('WebSocket bağlantısı kuruluyor...');
-    const websocket = new WebSocket('ws://localhost:8080');
     
-    websocket.onopen = () => {
-      console.log('WebSocket bağlantısı açıldı');
-      setWsConnected(true);
-    };
-
-    websocket.onmessage = (event) => {
-      console.log('Ham veri alındı:', event.data);
-      try {
-        const packet = JSON.parse(event.data);
-        console.log('İşlenmiş paket:', packet);
+    try {
+        // WebSocket URL'ini dinamik olarak belirle
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.hostname}:8080`;
+        console.log('WebSocket URL:', wsUrl);
         
-        setPackets(prev => {
-          console.log('Önceki paketler:', prev);
-          if (prev.length > 100) {
-            return [...prev.slice(-99), packet];
-          }
-          return [...prev, packet];
-        });
+        const websocket = new WebSocket(wsUrl);
         
-        if (packet.source_location && packet.dest_location) {
-          console.log('Konum bilgisi olan paket:', packet);
-          const connectionKey = `${packet.source_ip}-${packet.dest_ip}`;
-          
-          if (!activeConnections.has(connectionKey)) {
-            console.log('Yeni bağlantı ekleniyor:', connectionKey);
-            setActiveConnections(prev => new Set([...prev, connectionKey]));
-            setConnections(prev => [...prev, packet]);
-          }
-        }
-      } catch (error) {
-        console.error('Paket işleme hatası:', error);
-      }
-    };
+        websocket.onopen = () => {
+            console.log('WebSocket bağlantısı açıldı');
+            setWsConnected(true);
+        };
 
-    websocket.onerror = (error) => {
-      console.error('WebSocket hatası:', error);
-      setWsConnected(false);
-    };
+        websocket.onmessage = (event) => {
+            console.log('Ham veri alındı:', event.data);
+            try {
+                const packet = JSON.parse(event.data);
+                console.log('İşlenmiş paket:', packet);
+                
+                if (packet.type === 'connection_test') {
+                    console.log('Bağlantı testi başarılı');
+                    return;
+                }
+                
+                setPackets(prev => {
+                    if (prev.length > 100) {
+                        return [...prev.slice(-99), packet];
+                    }
+                    return [...prev, packet];
+                });
+                
+                if (packet.source_location && packet.dest_location) {
+                    console.log('Konum bilgisi olan paket:', packet);
+                    setConnections(prev => [...prev, packet]);
+                }
+            } catch (error) {
+                console.error('Paket işleme hatası:', error);
+            }
+        };
 
-    websocket.onclose = () => {
-      console.log('WebSocket bağlantısı kapandı');
-      setWsConnected(false);
-      // 5 saniye sonra yeniden bağlanmayı dene
-      setTimeout(connectWebSocket, 5000);
-    };
+        websocket.onerror = (error) => {
+            console.error('WebSocket hatası:', error);
+            setWsConnected(false);
+        };
 
-    return websocket;
-  }, [activeConnections]);
+        websocket.onclose = () => {
+            console.log('WebSocket bağlantısı kapandı');
+            setWsConnected(false);
+            // 3 saniye sonra yeniden bağlanmayı dene
+            setTimeout(connectWebSocket, 3000);
+        };
+
+        return websocket;
+    } catch (error) {
+        console.error('WebSocket bağlantısı oluşturulamadı:', error);
+        setTimeout(connectWebSocket, 3000);
+        return null;
+    }
+  }, []);
 
   useEffect(() => {
     const ws = connectWebSocket();

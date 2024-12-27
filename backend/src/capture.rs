@@ -36,35 +36,36 @@ pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), B
     let interfaces = datalink::interfaces();
     
     // Arayüzleri göster
-    println!("Mevcut ağ arayüzleri:");
-    for iface in &interfaces {
-        println!("- {} ({})", iface.name, if iface.is_up() { "Aktif" } else { "Pasif" });
-        println!("  Açıklama: {}", iface.description);
-        if let Some(mac) = iface.mac {
-            println!("  MAC: {}", mac);
-        }
-        if !iface.ips.is_empty() {
-            println!("  IPs: {:?}", iface.ips);
-        }
+    println!("\nMevcut ağ arayüzleri:");
+    for (idx, iface) in interfaces.iter().enumerate() {
+        println!("{}. {} ({})", idx + 1, iface.name, if iface.is_up() { "Aktif" } else { "Pasif" });
+        println!("   Açıklama: {}", iface.description);
+        println!("   MAC: {:?}", iface.mac);
+        println!("   IP'ler: {:?}", iface.ips);
+        println!("   Flags: up={}, broadcast={}, loopback={}", 
+            iface.is_up(), iface.is_broadcast(), iface.is_loopback());
+        println!("---");
     }
     
-    // Aktif ağ arayüzünü seç
+    // Wi-Fi veya Ethernet arayüzünü seç
     let interface = interfaces.iter()
         .find(|iface| {
-            println!("Arayüz kontrol ediliyor: {}", iface.name);
-            println!("  Açıklama: {}", iface.description);
-            println!("  Aktif: {}", iface.is_up());
-            println!("  IP'ler: {:?}", iface.ips);
-            
-            !iface.is_loopback() && 
-            iface.is_up() &&  // Aktif olmalı
-            !iface.ips.is_empty() &&  // IP adresi olmalı
-            iface.name.starts_with("\\Device\\NPF_")
+            let desc = iface.description.to_lowercase();
+            iface.is_up() && 
+            !iface.is_loopback() &&
+            (desc.contains("wi-fi") || 
+             desc.contains("wireless") || 
+             desc.contains("ethernet") ||
+             desc.contains("intel") ||
+             desc.contains("realtek"))
         })
         .ok_or("Kullanılabilir ağ arayüzü bulunamadı")?
         .clone();
 
-    println!("\nSeçilen arayüz: {}", interface.name);
+    println!("\nSeçilen arayüz:");
+    println!("İsim: {}", interface.name);
+    println!("Açıklama: {}", interface.description);
+    println!("MAC: {:?}", interface.mac);
     println!("IP'ler: {:?}", interface.ips);
 
     // Arayüzü aç - promiscuous modu aktif et
@@ -79,47 +80,70 @@ pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), B
         promiscuous: true,
     };
 
+    println!("\nAğ arayüzü açılıyor...");
     let (_, mut rx) = match datalink::channel(&interface, config) {
-        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        Ok(datalink::Channel::Ethernet(tx, rx)) => {
+            println!("Ağ arayüzü başarıyla açıldı");
+            (tx, rx)
+        },
         Ok(_) => return Err("Desteklenmeyen kanal türü".into()),
-        Err(e) => return Err(e.into()),
+        Err(e) => {
+            println!("Ağ arayüzü açılamadı: {}", e);
+            return Err(e.into())
+        },
     };
 
     println!("\nPaket yakalama başlatıldı...");
+    println!("Ağ trafiği izleniyor...\n");
 
-    // Test paketi gönder
-    let test_packet = json!({
-        "size": 100,
-        "source_ip": "192.168.1.1",
-        "dest_ip": "8.8.8.8",
-        "source_location": {
-            "latitude": 41.0082,
-            "longitude": 28.9784,
-            "country": "Turkey",
-            "city": "Istanbul"
-        },
-        "dest_location": {
-            "latitude": 37.4223,
-            "longitude": -122.0847,
-            "country": "United States",
-            "city": "Mountain View"
-        },
-        "timestamp": chrono::Local::now().to_rfc3339()
-    });
-
-    println!("Test paketi gönderiliyor...");
-    if let Err(e) = tx.send(test_packet.to_string()) {
-        eprintln!("Test paketi gönderilemedi: {}", e);
-    } else {
-        println!("Test paketi gönderildi");
-    }
-
-    // Normal paket yakalamaya devam et
+    // Normal paket yakalamaya başla
     loop {
         match rx.next() {
             Ok(packet) => {
-                println!("Paket yakalandı: {} bytes", packet.len());
-                // ... geri kalan kodlar aynı ...
+                if let Some(ethernet) = EthernetPacket::new(packet) {
+                    if ethernet.get_ethertype().0 == 0x0800 {  // IPv4
+                        if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
+                            let src_ip = ipv4.get_source().to_string();
+                            let dst_ip = ipv4.get_destination().to_string();
+
+                            // Özel IP'leri filtrele
+                            if !is_private_ip(&src_ip) || !is_private_ip(&dst_ip) {
+                                println!("Dış IP paketi bulundu: {} -> {}", src_ip, dst_ip);
+
+                                let mut source_location = None;
+                                let mut dest_location = None;
+
+                                // IP konumlarını bul
+                                if let Ok(src_addr) = src_ip.parse::<IpAddr>() {
+                                    source_location = get_location(&geoip_dbs, src_addr);
+                                }
+                                if let Ok(dst_addr) = dst_ip.parse::<IpAddr>() {
+                                    dest_location = get_location(&geoip_dbs, dst_addr);
+                                }
+
+                                // Paket bilgilerini JSON'a çevir
+                                let packet_info = json!({
+                                    "size": ethernet.packet().len(),
+                                    "source_mac": ethernet.get_source().to_string(),
+                                    "dest_mac": ethernet.get_destination().to_string(),
+                                    "source_ip": src_ip,
+                                    "dest_ip": dst_ip,
+                                    "source_location": source_location,
+                                    "dest_location": dest_location,
+                                    "timestamp": chrono::Local::now().to_rfc3339()
+                                });
+
+                                // WebSocket üzerinden gönder
+                                println!("Paket gönderiliyor: {}", packet_info);
+                                if let Err(e) = tx.send(packet_info.to_string()) {
+                                    eprintln!("Paket gönderme hatası: {}", e);
+                                } else {
+                                    println!("Paket başarıyla gönderildi");
+                                }
+                            }
+                        }
+                    }
+                }
             },
             Err(e) => {
                 eprintln!("Paket yakalama hatası: {}", e);
@@ -157,6 +181,13 @@ fn get_location(dbs: &GeoDatabases, addr: IpAddr) -> Option<serde_json::Value> {
     if let Ok(city) = dbs.city.lookup::<geoip2::City>(addr) {
         if let (Some(lat), Some(lon)) = (city.location.as_ref().and_then(|l| l.latitude), 
                                        city.location.as_ref().and_then(|l| l.longitude)) {
+            println!("Konum bulundu: {}, {} ({}, {})", 
+                city.country.as_ref().and_then(|c| c.names.as_ref())
+                    .and_then(|n| n.get("en")).unwrap_or(&"Unknown"),
+                city.city.as_ref().and_then(|c| c.names.as_ref())
+                    .and_then(|n| n.get("en")).unwrap_or(&"Unknown"),
+                lat, lon);
+
             return Some(json!({
                 "latitude": lat,
                 "longitude": lon,
@@ -167,15 +198,5 @@ fn get_location(dbs: &GeoDatabases, addr: IpAddr) -> Option<serde_json::Value> {
             }));
         }
     }
-    
-    // City bulunamazsa country'yi dene
-    if let Ok(country) = dbs.country.lookup::<geoip2::Country>(addr) {
-        return Some(json!({
-            "country": country.country.as_ref().and_then(|c| c.names.as_ref())
-                      .and_then(|n| n.get("en")).unwrap_or(&"Unknown"),
-            "city": "Unknown"
-        }));
-    }
-    
     None
 } 
