@@ -8,8 +8,8 @@ use tokio::sync::broadcast;
 use std::net::SocketAddr;
 use http::{HeaderValue, header};
 
-async fn handle_websocket_upgrade(request: Request) -> Result<Response, WsError> {
-    let mut response = Response::new(None);
+async fn handle_websocket_upgrade(_request: Request) -> Result<Response, WsError> {
+    let mut response = Response::new(());
     
     // CORS başlıklarını ekle
     let headers = response.headers_mut();

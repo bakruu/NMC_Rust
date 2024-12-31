@@ -23,7 +23,8 @@ async fn main() {
             match capture::start_packet_capture(tx.clone()).await {
                 Ok(_) => println!("Paket yakalama normal şekilde sonlandı"),
                 Err(e) => {
-                    eprintln!("Paket yakalama hatası: {}", e);
+                    let error_msg = format!("Paket yakalama hatası: {}", e);
+                    eprintln!("{}", error_msg);
                     println!("5 saniye sonra yeniden başlatılacak...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }

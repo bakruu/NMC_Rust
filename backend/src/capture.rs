@@ -8,18 +8,51 @@ use pnet::packet::Packet;
 use serde_json::json;
 use tokio::sync::broadcast;
 
+// Error trait'ini implement eden özel hata türü
+#[derive(Debug)]
+pub struct CaptureError(String);
+
+impl std::fmt::Display for CaptureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CaptureError {}
+
+// Box<dyn Error>'dan CaptureError'a dönüşüm için From trait'i
+impl From<Box<dyn Error>> for CaptureError {
+    fn from(error: Box<dyn Error>) -> Self {
+        CaptureError(error.to_string())
+    }
+}
+
+// String'den CaptureError'a dönüşüm
+impl From<String> for CaptureError {
+    fn from(error: String) -> Self {
+        CaptureError(error)
+    }
+}
+
+// &str'den CaptureError'a dönüşüm
+impl From<&str> for CaptureError {
+    fn from(error: &str) -> Self {
+        CaptureError(error.to_string())
+    }
+}
+
 // GeoIP veritabanlarını yükle
 struct GeoDatabases {
     city: maxminddb::Reader<Vec<u8>>,
     country: maxminddb::Reader<Vec<u8>>,
 }
 
-fn load_geoip_dbs() -> Result<GeoDatabases, Box<dyn Error>> {
+fn load_geoip_dbs() -> Result<GeoDatabases, CaptureError> {
     let city_reader = maxminddb::Reader::open_readfile("assets/GeoLite2-City.mmdb")
-        .map_err(|e| format!("GeoIP City veritabanı yüklenemedi: {}", e))?;
+        .map_err(|e| CaptureError(format!("GeoIP City veritabanı yüklenemedi: {}", e)))?;
     
     let country_reader = maxminddb::Reader::open_readfile("assets/GeoLite2-Country.mmdb")
-        .map_err(|e| format!("GeoIP Country veritabanı yüklenemedi: {}", e))?;
+        .map_err(|e| CaptureError(format!("GeoIP Country veritabanı yüklenemedi: {}", e)))?;
     
     Ok(GeoDatabases {
         city: city_reader,
@@ -27,7 +60,7 @@ fn load_geoip_dbs() -> Result<GeoDatabases, Box<dyn Error>> {
     })
 }
 
-pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), Box<dyn Error>> {
+pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), CaptureError> {
     println!("GeoIP veritabanları yükleniyor...");
     let geoip_dbs = load_geoip_dbs()?;
     println!("GeoIP veritabanları başarıyla yüklendi");
@@ -59,7 +92,7 @@ pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), B
              desc.contains("intel") ||
              desc.contains("realtek"))
         })
-        .ok_or("Kullanılabilir ağ arayüzü bulunamadı")?
+        .ok_or_else(|| CaptureError("Kullanılabilir ağ arayüzü bulunamadı".to_string()))?
         .clone();
 
     println!("\nSeçilen arayüz:");
@@ -86,10 +119,10 @@ pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), B
             println!("Ağ arayüzü başarıyla açıldı");
             (tx, rx)
         },
-        Ok(_) => return Err("Desteklenmeyen kanal türü".into()),
+        Ok(_) => return Err(CaptureError("Desteklenmeyen kanal türü".to_string())),
         Err(e) => {
             println!("Ağ arayüzü açılamadı: {}", e);
-            return Err(e.into())
+            return Err(CaptureError(e.to_string()))
         },
     };
 
