@@ -1,109 +1,88 @@
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::broadcast;
 use tokio_tungstenite::{
     accept_async,
-    tungstenite::{Message, Error as WsError, handshake::server::{Request, Response}},
+    tungstenite::protocol::Message,
+    tungstenite::handshake::server::{Request, Response},
 };
 use futures::{StreamExt, SinkExt};
-use tokio::sync::broadcast;
-use std::net::SocketAddr;
-use http::{HeaderValue, header};
+use serde_json::json;
 
-async fn handle_websocket_upgrade(_request: Request) -> Result<Response, WsError> {
-    let mut response = Response::new(());
-    
-    // CORS başlıklarını ekle
-    let headers = response.headers_mut();
-    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, 
-        HeaderValue::from_static("*"));
-    headers.insert(header::ACCESS_CONTROL_ALLOW_METHODS, 
-        HeaderValue::from_static("GET, POST, OPTIONS"));
-    headers.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, 
-        HeaderValue::from_static("*"));
-    
-    Ok(response)
-}
+pub async fn start_websocket_server(tx: broadcast::Sender<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let addr = "127.0.0.1:8080";
+    let listener = TcpListener::bind(addr).await?;
+    println!("WebSocket sunucusu başlatıldı: {}", addr);
 
-pub async fn start_websocket_server(tx: broadcast::Sender<String>) {
-    let addr = SocketAddr::from(([0, 0, 0, 0], 8080));  // Tüm IP'lerden bağlantı kabul et
-    println!("WebSocket sunucusu {} adresinde başlatılıyor...", addr);
-    
-    let try_socket = TcpListener::bind(&addr).await;
-    let listener = match try_socket {
-        Ok(l) => {
-            println!("WebSocket sunucusu başarıyla başlatıldı");
-            l
-        },
-        Err(e) => {
-            eprintln!("WebSocket sunucusu başlatılamadı: {}", e);
-            eprintln!("Port 8080 zaten kullanımda olabilir");
-            return;
-        }
-    };
-
-    println!("WebSocket bağlantıları bekleniyor...");
-
-    while let Ok((stream, peer)) = listener.accept().await {
-        println!("Yeni bağlantı isteği: {}", peer);
-        let tx = tx.subscribe();
-        
+    while let Ok((stream, addr)) = listener.accept().await {
+        println!("Yeni bağlantı: {}", addr);
+        let tx = tx.clone();
         tokio::spawn(async move {
-            match handle_connection(stream, peer, tx).await {
-                Ok(_) => println!("Bağlantı kapandı: {}", peer),
-                Err(e) => eprintln!("Bağlantı hatası {}: {}", peer, e),
+            match handle_connection(stream, tx).await {
+                Ok(_) => println!("Bağlantı normal şekilde kapandı: {}", addr),
+                Err(e) => eprintln!("Bağlantı hatası {}: {}", addr, e),
             }
         });
     }
+
+    Ok(())
 }
 
-async fn handle_connection(
-    stream: TcpStream,
-    peer: SocketAddr,
-    mut rx: broadcast::Receiver<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_connection(stream: TcpStream, tx: broadcast::Sender<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let ws_stream = accept_async(stream).await?;
-    println!("WebSocket el sıkışması tamamlandı: {}", peer);
+    println!("WebSocket bağlantısı kuruldu");
 
     let (mut write, mut read) = ws_stream.split();
+    let mut rx = tx.subscribe();
 
-    // Test mesajı gönder
-    let test_msg = serde_json::json!({
-        "type": "connection_test",
-        "message": "WebSocket bağlantısı başarılı",
-        "timestamp": chrono::Local::now().to_rfc3339()
-    }).to_string();
-
-    write.send(Message::Text(test_msg)).await?;
-    println!("Test mesajı gönderildi: {}", peer);
-
-    // Gelen mesajları dinle
-    let read_future = async move {
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(_) => println!("İstemciden mesaj alındı: {}", peer),
-                Err(e) => {
-                    eprintln!("WebSocket okuma hatası {}: {}", peer, e);
-                    break;
-                }
-            }
+    // İlk bağlantıda test verisi gönder
+    let test_data = json!([{
+        "source": {
+            "ip": "192.168.1.1",
+            "port": 8080,
+            "latitude": 41.0082,
+            "longitude": 28.9784
+        },
+        "destination": {
+            "ip": "192.168.1.2",
+            "port": 80,
+            "latitude": 39.9334,
+            "longitude": 32.8597
         }
-    };
+    }]);
 
-    // Broadcast kanalından gelen mesajları gönder
-    let write_future = async move {
+    write.send(Message::Text(test_data.to_string())).await?;
+    println!("Test verisi gönderildi");
+
+    // Paket verilerini dinle ve WebSocket üzerinden gönder
+    let forward_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
-            println!("Mesaj gönderiliyor -> {}: {}", peer, msg);
+            println!("Gönderilen veri: {}", msg);
             if let Err(e) = write.send(Message::Text(msg)).await {
-                eprintln!("WebSocket gönderme hatası {}: {}", peer, e);
+                println!("Mesaj gönderme hatası: {}", e);
                 break;
             }
         }
-    };
+    });
 
-    // Her iki task'ı da çalıştır
-    tokio::select! {
-        _ = read_future => println!("Okuma task'ı sonlandı: {}", peer),
-        _ = write_future => println!("Yazma task'ı sonlandı: {}", peer),
+    // WebSocket mesajlarını dinle
+    while let Some(msg) = read.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                println!("Gelen mesaj: {}", text);
+            }
+            Ok(Message::Close(_)) => {
+                println!("Bağlantı kapatma isteği alındı");
+                break;
+            }
+            Err(e) => {
+                println!("Hata: {}", e);
+                break;
+            }
+            _ => {}
+        }
     }
 
+    forward_task.abort();
+    println!("WebSocket bağlantısı kapandı");
     Ok(())
 } 

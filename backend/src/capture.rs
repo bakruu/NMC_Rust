@@ -1,235 +1,163 @@
-use std::error::Error;
+use pnet::datalink::{self, NetworkInterface};
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ipv4::Ipv4Packet;
+use pnet::packet::tcp::TcpPacket;
+use pnet::packet::udp::UdpPacket;
+use pnet::packet::Packet;
+use tokio::sync::broadcast;
+use serde_json::json;
 use std::net::IpAddr;
 use maxminddb::geoip2;
-use pnet::datalink;
-use pnet::packet::ethernet::EthernetPacket;
-use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::Packet;
-use serde_json::json;
-use tokio::sync::broadcast;
+use std::sync::Arc;
 
-// Error trait'ini implement eden özel hata türü
-#[derive(Debug)]
-pub struct CaptureError(String);
+fn is_interesting_connection(src_ip: IpAddr, dst_ip: IpAddr) -> bool {
+    match (src_ip, dst_ip) {
+        (IpAddr::V4(src), IpAddr::V4(dst)) => {
+            // Yerel ağ IP'lerini filtrele
+            if src.is_private() || dst.is_private() {
+                return false;
+            }
 
-impl std::fmt::Display for CaptureError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+            // Loopback ve özel IP'leri filtrele
+            if src.is_loopback() || dst.is_loopback() ||
+               src.is_unspecified() || dst.is_unspecified() ||
+               src.is_broadcast() || dst.is_broadcast() {
+                return false;
+            }
+
+            // Çok kullanılan bazı portları filtrele (isteğe bağlı)
+            // if src_port == 53 || dst_port == 53 {  // DNS
+            //     return false;
+            // }
+
+            true
+        },
+        _ => false  // IPv6'yı şimdilik yok say
     }
 }
 
-impl std::error::Error for CaptureError {}
+pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // GeoIP veritabanı yolunu düzelt
+    let reader = Arc::new(maxminddb::Reader::open_readfile("assets/GeoLite2-City.mmdb")
+        .or_else(|_| maxminddb::Reader::open_readfile("../assets/GeoLite2-City.mmdb"))
+        .or_else(|_| maxminddb::Reader::open_readfile("../../assets/GeoLite2-City.mmdb"))
+        .map_err(|e| format!("GeoIP veritabanı yüklenemedi: {}", e))?);
 
-// Box<dyn Error>'dan CaptureError'a dönüşüm için From trait'i
-impl From<Box<dyn Error>> for CaptureError {
-    fn from(error: Box<dyn Error>) -> Self {
-        CaptureError(error.to_string())
-    }
-}
+    println!("GeoIP veritabanı başarıyla yüklendi");
 
-// String'den CaptureError'a dönüşüm
-impl From<String> for CaptureError {
-    fn from(error: String) -> Self {
-        CaptureError(error)
-    }
-}
-
-// &str'den CaptureError'a dönüşüm
-impl From<&str> for CaptureError {
-    fn from(error: &str) -> Self {
-        CaptureError(error.to_string())
-    }
-}
-
-// GeoIP veritabanlarını yükle
-struct GeoDatabases {
-    city: maxminddb::Reader<Vec<u8>>,
-    country: maxminddb::Reader<Vec<u8>>,
-}
-
-fn load_geoip_dbs() -> Result<GeoDatabases, CaptureError> {
-    let city_reader = maxminddb::Reader::open_readfile("assets/GeoLite2-City.mmdb")
-        .map_err(|e| CaptureError(format!("GeoIP City veritabanı yüklenemedi: {}", e)))?;
-    
-    let country_reader = maxminddb::Reader::open_readfile("assets/GeoLite2-Country.mmdb")
-        .map_err(|e| CaptureError(format!("GeoIP Country veritabanı yüklenemedi: {}", e)))?;
-    
-    Ok(GeoDatabases {
-        city: city_reader,
-        country: country_reader,
-    })
-}
-
-pub async fn start_packet_capture(tx: broadcast::Sender<String>) -> Result<(), CaptureError> {
-    println!("GeoIP veritabanları yükleniyor...");
-    let geoip_dbs = load_geoip_dbs()?;
-    println!("GeoIP veritabanları başarıyla yüklendi");
-
-    // Tüm arayüzleri listele
+    // Ağ arayüzlerini al
     let interfaces = datalink::interfaces();
     
-    // Arayüzleri göster
-    println!("\nMevcut ağ arayüzleri:");
-    for (idx, iface) in interfaces.iter().enumerate() {
-        println!("{}. {} ({})", idx + 1, iface.name, if iface.is_up() { "Aktif" } else { "Pasif" });
-        println!("   Açıklama: {}", iface.description);
-        println!("   MAC: {:?}", iface.mac);
-        println!("   IP'ler: {:?}", iface.ips);
-        println!("   Flags: up={}, broadcast={}, loopback={}", 
-            iface.is_up(), iface.is_broadcast(), iface.is_loopback());
-        println!("---");
-    }
-    
-    // Wi-Fi veya Ethernet arayüzünü seç
-    let interface = interfaces.iter()
-        .find(|iface| {
-            let desc = iface.description.to_lowercase();
-            iface.is_up() && 
-            !iface.is_loopback() &&
-            (desc.contains("wi-fi") || 
-             desc.contains("wireless") || 
-             desc.contains("ethernet") ||
-             desc.contains("intel") ||
-             desc.contains("realtek"))
-        })
-        .ok_or_else(|| CaptureError("Kullanılabilir ağ arayüzü bulunamadı".to_string()))?
-        .clone();
+    // İlk aktif arayüzü bul
+    let interface = interfaces
+        .into_iter()
+        .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty())
+        .ok_or("Aktif ağ arayüzü bulunamadı")?;
 
-    println!("\nSeçilen arayüz:");
-    println!("İsim: {}", interface.name);
-    println!("Açıklama: {}", interface.description);
-    println!("MAC: {:?}", interface.mac);
-    println!("IP'ler: {:?}", interface.ips);
+    println!("Seçilen arayüz: {}", interface.name);
 
-    // Arayüzü aç - promiscuous modu aktif et
-    let config = pnet::datalink::Config {
-        read_timeout: None,
-        write_timeout: None,
-        read_buffer_size: 65536,
-        write_buffer_size: 65536,
-        channel_type: pnet::datalink::ChannelType::Layer2,
-        bpf_fd_attempts: 1000,
-        linux_fanout: None,
-        promiscuous: true,
+    // Paket yakalayıcıyı oluştur
+    let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
+        Ok(datalink::Channel::Ethernet(tx, rx)) => (tx, rx),
+        Ok(_) => return Err("Desteklenmeyen kanal türü".into()),
+        Err(e) => return Err(e.into()),
     };
 
-    println!("\nAğ arayüzü açılıyor...");
-    let (_, mut rx) = match datalink::channel(&interface, config) {
-        Ok(datalink::Channel::Ethernet(tx, rx)) => {
-            println!("Ağ arayüzü başarıyla açıldı");
-            (tx, rx)
-        },
-        Ok(_) => return Err(CaptureError("Desteklenmeyen kanal türü".to_string())),
-        Err(e) => {
-            println!("Ağ arayüzü açılamadı: {}", e);
-            return Err(CaptureError(e.to_string()))
-        },
-    };
+    println!("Paket yakalama başladı...");
 
-    println!("\nPaket yakalama başlatıldı...");
-    println!("Ağ trafiği izleniyor...\n");
-
-    // Normal paket yakalamaya başla
+    // Paketleri yakala
     loop {
         match rx.next() {
             Ok(packet) => {
-                if let Some(ethernet) = EthernetPacket::new(packet) {
-                    if ethernet.get_ethertype().0 == 0x0800 {  // IPv4
-                        if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
-                            let src_ip = ipv4.get_source().to_string();
-                            let dst_ip = ipv4.get_destination().to_string();
+                if let Some(ip_packet) = Ipv4Packet::new(packet) {
+                    let src_ip = IpAddr::V4(ip_packet.get_source());
+                    let dst_ip = IpAddr::V4(ip_packet.get_destination());
 
-                            // Özel IP'leri filtrele
-                            if !is_private_ip(&src_ip) || !is_private_ip(&dst_ip) {
-                                println!("Dış IP paketi bulundu: {} -> {}", src_ip, dst_ip);
+                    // Sadece ilginç bağlantıları işle
+                    if !is_interesting_connection(src_ip, dst_ip) {
+                        continue;
+                    }
 
-                                let mut source_location = None;
-                                let mut dest_location = None;
-
-                                // IP konumlarını bul
-                                if let Ok(src_addr) = src_ip.parse::<IpAddr>() {
-                                    source_location = get_location(&geoip_dbs, src_addr);
-                                }
-                                if let Ok(dst_addr) = dst_ip.parse::<IpAddr>() {
-                                    dest_location = get_location(&geoip_dbs, dst_addr);
-                                }
-
-                                // Paket bilgilerini JSON'a çevir
-                                let packet_info = json!({
-                                    "size": ethernet.packet().len(),
-                                    "source_mac": ethernet.get_source().to_string(),
-                                    "dest_mac": ethernet.get_destination().to_string(),
-                                    "source_ip": src_ip,
-                                    "dest_ip": dst_ip,
-                                    "source_location": source_location,
-                                    "dest_location": dest_location,
-                                    "timestamp": chrono::Local::now().to_rfc3339()
-                                });
-
-                                // WebSocket üzerinden gönder
-                                println!("Paket gönderiliyor: {}", packet_info);
-                                if let Err(e) = tx.send(packet_info.to_string()) {
-                                    eprintln!("Paket gönderme hatası: {}", e);
-                                } else {
-                                    println!("Paket başarıyla gönderildi");
-                                }
+                    // Port bilgilerini al
+                    let (src_port, dst_port) = match ip_packet.get_next_level_protocol() {
+                        IpNextHeaderProtocols::Tcp => {
+                            if let Some(tcp) = TcpPacket::new(ip_packet.payload()) {
+                                (tcp.get_source(), tcp.get_destination())
+                            } else {
+                                continue;
                             }
+                        },
+                        IpNextHeaderProtocols::Udp => {
+                            if let Some(udp) = UdpPacket::new(ip_packet.payload()) {
+                                (udp.get_source(), udp.get_destination())
+                            } else {
+                                continue;
+                            }
+                        },
+                        _ => continue,
+                    };
+
+                    // GeoIP sorguları
+                    let src_location = match reader.lookup::<geoip2::City>(src_ip) {
+                        Ok(city) => {
+                            city.location.as_ref()
+                                .and_then(|loc| {
+                                    Some((
+                                        loc.latitude.unwrap_or_default(),
+                                        loc.longitude.unwrap_or_default()
+                                    ))
+                                })
+                        },
+                        Err(e) => {
+                            println!("GeoIP hatası (kaynak): {} için {}", src_ip, e);
+                            None
+                        }
+                    };
+
+                    let dst_location = match reader.lookup::<geoip2::City>(dst_ip) {
+                        Ok(city) => {
+                            city.location.as_ref()
+                                .and_then(|loc| {
+                                    Some((
+                                        loc.latitude.unwrap_or_default(),
+                                        loc.longitude.unwrap_or_default()
+                                    ))
+                                })
+                        },
+                        Err(e) => {
+                            println!("GeoIP hatası (hedef): {} için {}", dst_ip, e);
+                            None
+                        }
+                    };
+
+                    if let (Some((src_lat, src_lon)), Some((dst_lat, dst_lon))) = (src_location, dst_location) {
+                        let connection = json!([{
+                            "source": {
+                                "ip": src_ip.to_string(),
+                                "port": src_port,
+                                "latitude": src_lat,
+                                "longitude": src_lon
+                            },
+                            "destination": {
+                                "ip": dst_ip.to_string(),
+                                "port": dst_port,
+                                "latitude": dst_lat,
+                                "longitude": dst_lon
+                            }
+                        }]);
+
+                        println!("Bağlantı: {}:{} -> {}:{}", src_ip, src_port, dst_ip, dst_port);
+                        println!("Konumlar: ({}, {}) -> ({}, {})", src_lat, src_lon, dst_lat, dst_lon);
+
+                        if let Err(e) = tx.send(connection.to_string()) {
+                            eprintln!("Veri gönderme hatası: {}", e);
                         }
                     }
                 }
-            },
+            }
             Err(e) => {
                 eprintln!("Paket yakalama hatası: {}", e);
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         }
     }
-}
-
-// Özel IP aralıklarını kontrol et
-fn is_private_ip(ip: &str) -> bool {
-    if let Ok(addr) = ip.parse::<std::net::Ipv4Addr>() {
-        if addr.is_loopback() || addr.is_link_local() {
-            println!("Loopback/Link-local IP bulundu: {}", ip);
-            return true;
-        }
-        if addr.is_private() {
-            println!("Özel IP bulundu: {}", ip);
-            return true;
-        }
-        if ip.starts_with("224.") || ip.starts_with("255.") {
-            println!("Multicast/Broadcast IP bulundu: {}", ip);
-            return true;
-        }
-        println!("Genel IP bulundu: {}", ip);
-        false
-    } else {
-        println!("Geçersiz IP adresi: {}", ip);
-        true
-    }
-}
-
-// IP konumunu bul
-fn get_location(dbs: &GeoDatabases, addr: IpAddr) -> Option<serde_json::Value> {
-    if let Ok(city) = dbs.city.lookup::<geoip2::City>(addr) {
-        if let (Some(lat), Some(lon)) = (city.location.as_ref().and_then(|l| l.latitude), 
-                                       city.location.as_ref().and_then(|l| l.longitude)) {
-            println!("Konum bulundu: {}, {} ({}, {})", 
-                city.country.as_ref().and_then(|c| c.names.as_ref())
-                    .and_then(|n| n.get("en")).unwrap_or(&"Unknown"),
-                city.city.as_ref().and_then(|c| c.names.as_ref())
-                    .and_then(|n| n.get("en")).unwrap_or(&"Unknown"),
-                lat, lon);
-
-            return Some(json!({
-                "latitude": lat,
-                "longitude": lon,
-                "country": city.country.as_ref().and_then(|c| c.names.as_ref())
-                            .and_then(|n| n.get("en")).unwrap_or(&"Unknown"),
-                "city": city.city.as_ref().and_then(|c| c.names.as_ref())
-                         .and_then(|n| n.get("en")).unwrap_or(&"Unknown")
-            }));
-        }
-    }
-    None
 } 

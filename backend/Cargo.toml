@@ -4,16 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pnet = "0.34"
-tokio = { version = "1.28", features = ["full"] }
-tokio-tungstenite = "0.20"
-serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.0.0", features = ["full"] }
+futures = { version = "0.3.17", features = ["std"] }
+pnet = "0.34.0"
+maxminddb = "0.23.0"
+serde = { version = "1.0.188", features = ["derive"] }
 serde_json = "1.0"
-maxminddb = "0.23"
-futures = "0.3"
-chrono = "0.4"
-dotenv = "0.15"
-http = "0.2"
-
-[build-dependencies]
-pkg-config = "0.3"
+chrono = "0.4.31"
+tokio-tungstenite = "0.20.1"
+http = "0.2.9"

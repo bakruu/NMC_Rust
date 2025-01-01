@@ -13,7 +13,9 @@ async fn main() {
     // WebSocket sunucusunu başlat
     let websocket_task = tokio::spawn(async move {
         println!("WebSocket sunucusu başlatılıyor...");
-        websocket::start_websocket_server(tx_ws).await;
+        if let Err(e) = websocket::start_websocket_server(tx_ws).await {
+            eprintln!("WebSocket sunucusu hatası: {}", e);
+        }
     });
 
     // Paket yakalamayı başlat
@@ -23,8 +25,7 @@ async fn main() {
             match capture::start_packet_capture(tx.clone()).await {
                 Ok(_) => println!("Paket yakalama normal şekilde sonlandı"),
                 Err(e) => {
-                    let error_msg = format!("Paket yakalama hatası: {}", e);
-                    eprintln!("{}", error_msg);
+                    eprintln!("Paket yakalama hatası: {}", e);
                     println!("5 saniye sonra yeniden başlatılacak...");
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 }

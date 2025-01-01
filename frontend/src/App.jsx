@@ -1,137 +1,80 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { Map } from './Map';
-import './App.css';
+import React, { useState, useEffect } from 'react';
+import Map from './Map';
 
 function App() {
-  const [packets, setPackets] = useState([]);
-  const [connections, setConnections] = useState([]);
-  const [activeConnections, setActiveConnections] = useState(new Set());
-  const [wsConnected, setWsConnected] = useState(false);
+    const [connections, setConnections] = useState([]);
+    const [error, setError] = useState(null);
+    const [wsInstance, setWsInstance] = useState(null);
 
-  const connectWebSocket = useCallback(() => {
-    console.log('WebSocket bağlantısı kuruluyor...');
-    
-    try {
-        // WebSocket URL'ini dinamik olarak belirle
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.hostname}:8080`;
-        console.log('WebSocket URL:', wsUrl);
-        
-        const websocket = new WebSocket(wsUrl);
-        
-        websocket.onopen = () => {
-            console.log('WebSocket bağlantısı açıldı');
-            setWsConnected(true);
-        };
+    useEffect(() => {
+        let ws = null;
+        let reconnectTimeout = null;
 
-        websocket.onmessage = (event) => {
-            console.log('Ham veri alındı:', event.data);
+        const connectWebSocket = () => {
             try {
-                const packet = JSON.parse(event.data);
-                console.log('İşlenmiş paket:', packet);
-                
-                if (packet.type === 'connection_test') {
-                    console.log('Bağlantı testi başarılı');
-                    return;
-                }
-                
-                setPackets(prev => {
-                    if (prev.length > 100) {
-                        return [...prev.slice(-99), packet];
+                ws = new WebSocket('ws://localhost:8080');
+                setWsInstance(ws);
+
+                ws.onopen = () => {
+                    console.log('WebSocket Bağlantısı Kuruldu');
+                    setError(null);
+                    // Test mesajı gönder
+                    ws.send(JSON.stringify({ type: 'test' }));
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        console.log('Gelen veri:', data);
+                        setConnections(data);
+                    } catch (err) {
+                        console.error('Veri işleme hatası:', err);
                     }
-                    return [...prev, packet];
-                });
-                
-                if (packet.source_location && packet.dest_location) {
-                    console.log('Konum bilgisi olan paket:', packet);
-                    setConnections(prev => [...prev, packet]);
-                }
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket hatası:', error);
+                    setError('WebSocket bağlantı hatası');
+                };
+
+                ws.onclose = () => {
+                    console.log('WebSocket bağlantısı kapandı');
+                    // 5 saniye sonra yeniden bağlanmayı dene
+                    reconnectTimeout = setTimeout(connectWebSocket, 5000);
+                };
             } catch (error) {
-                console.error('Paket işleme hatası:', error);
+                console.error('WebSocket bağlantı hatası:', error);
+                setError('WebSocket bağlantı hatası');
+                reconnectTimeout = setTimeout(connectWebSocket, 5000);
             }
         };
 
-        websocket.onerror = (error) => {
-            console.error('WebSocket hatası:', error);
-            setWsConnected(false);
-        };
+        connectWebSocket();
 
-        websocket.onclose = () => {
-            console.log('WebSocket bağlantısı kapandı');
-            setWsConnected(false);
-            // 3 saniye sonra yeniden bağlanmayı dene
-            setTimeout(connectWebSocket, 3000);
+        return () => {
+            if (reconnectTimeout) {
+                clearTimeout(reconnectTimeout);
+            }
+            if (ws) {
+                ws.close();
+            }
         };
+    }, []);
 
-        return websocket;
-    } catch (error) {
-        console.error('WebSocket bağlantısı oluşturulamadı:', error);
-        setTimeout(connectWebSocket, 3000);
-        return null;
+    if (error) {
+        return (
+            <div>
+                <div>Hata: {error}</div>
+                <div>Yeniden bağlanmaya çalışılıyor...</div>
+            </div>
+        );
     }
-  }, []);
 
-  useEffect(() => {
-    const ws = connectWebSocket();
-    return () => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      }
-    };
-  }, [connectWebSocket]);
-
-  return (
-    <div className="app-container">
-      <Map connections={connections} />
-      <div className="packets-list">
-        <h1>Ağ Trafiği İzleyici</h1>
-        <div className="connection-status">
-          <span className={`status-indicator ${wsConnected ? 'connected' : 'disconnected'}`}>
-            {wsConnected ? 'Bağlı' : 'Bağlantı Kesik'}
-          </span>
+    return (
+        <div style={{ height: '100vh', width: '100%' }}>
+            <Map connections={connections} />
         </div>
-        <div className="active-connections">
-          <h2>Aktif Bağlantılar</h2>
-          {connections.map((conn, index) => (
-            <div key={index} className="connection-item">
-              <p><strong>Kaynak:</strong> {conn.source_ip}</p>
-              <p>{conn.source_location?.country}, {conn.source_location?.city}</p>
-              <p><strong>Hedef:</strong> {conn.dest_ip}</p>
-              <p>{conn.dest_location?.country}, {conn.dest_location?.city}</p>
-              <hr />
-            </div>
-          ))}
-        </div>
-        <div className="recent-packets">
-          <h2>Son Paketler</h2>
-          {packets.slice(-10).reverse().map((packet, index) => (
-            <div key={index} className="packet-item">
-              <p>Boyut: {packet.size} bytes</p>
-              {packet.source_ip && (
-                <p>Kaynak: {packet.source_ip}
-                  {packet.source_location && 
-                    <span className="location-info">
-                      ({packet.source_location.country}, {packet.source_location.city})
-                    </span>
-                  }
-                </p>
-              )}
-              {packet.dest_ip && (
-                <p>Hedef: {packet.dest_ip}
-                  {packet.dest_location && 
-                    <span className="location-info">
-                      ({packet.dest_location.country}, {packet.dest_location.city})
-                    </span>
-                  }
-                </p>
-              )}
-              <p>Zaman: {new Date(packet.timestamp).toLocaleTimeString()}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
+    );
 }
 
 export default App; 
